@@ -1,9 +1,4 @@
 # -*- coding: utf-8 -*-
-# @Author: Jie Yang
-# @Date:   2017-10-17 16:47:32
-# @Last Modified by:   Jie Yang,     Contact: jieynlp@gmail.com
-# @Last Modified time: 2017-12-14 12:04:48
-
 import torch
 import torch.autograd as autograd
 import torch.nn as nn
@@ -11,7 +6,7 @@ import torch.nn.functional as F
 import numpy as np
 from bilstm import BiLSTM
 #from crf import CRF
-from reformulator import Reformulator
+from examiner import Examiner
 from torch.autograd import Variable
 import nltk
 from sklearn_crfsuite import CRF
@@ -20,41 +15,40 @@ import math
 
 class BiLSTM_CRF():
     def __init__(self, data):
-        #super(BiLSTM_CRF, self).__init__()
+
         print "build batched lstmcrf..."
 
-        ## add two more label for downlayer lstm, use original label size for CRF
-        #label_size = data.label_alphabet_size
         self.label_alphabet=data.label_alphabet
         self.word_alphabet=data.word_alphabet
-        #self.label_alphabet_size += 2
+
         self.crf = CRF(
             algorithm='lbfgs',
             c1=0.1,
             c2=0.1,
             max_iterations=100,
-            all_possible_transitions=True
+            all_possible_transitions=False
         )
-        self.reformulator = Reformulator(data)
-        self.useReformulator = False
+        self.examiner = Examiner(data)
+        self.useExaminer = False
         self.loss_function = nn.NLLLoss()
-        self.topk=50
+        self.topk=5
         self.X_train=[]
         self.Y_train=[]
-        self.tag_mask_list=[]
+        self.pos_mask_list=[]
         self.instances=[]
         self.scores_refs=[]
-        self.tag_mask=None
+        self.pos_mask=None
+        self.tag_size=data.label_alphabet_size
 
     #For the afterward updating of the crf
     def masked_label(self,pos_mask,mask,batch_label,tag_seq):
 
 
-        #batch_label=batch_label.mul(1-pos_mask)
+        batch_label=batch_label.mul(1-pos_mask)
 
-        #tag_seq=Variable(tag_seq).cuda().mul(pos_mask)
+        tag_seq=Variable(tag_seq).cuda().mul(pos_mask)
 
-        return batch_label#+tag_seq
+        return batch_label+tag_seq
 
     def ner(sentence):
         sentence_features = [self.features(sentence, index) for index in range(len(sentence))]
@@ -64,20 +58,19 @@ class BiLSTM_CRF():
         batch_size = word_inputs.size(0)
         seq_len = word_inputs.size(1)
         total_word = batch_size * seq_len
-        if self.topk==50:
+        if self.full==True:
             return Variable(torch.zeros(batch_size,seq_len).cuda().long(),requires_grad=False)
-        _=Variable(torch.rand(batch_size,seq_len),requires_grad=False)
+        rand_vec=Variable(torch.rand(batch_size,seq_len),requires_grad=False)
 
-        _=mask.float() * _.cuda()
+        rand_vec=mask.float() * rand_vec.cuda()
 
         if seq_len>=self.topk:
-            topk, indices = _.topk(self.topk,dim=1)
+            topk, indices = rand_vec.topk(self.topk,dim=1)
         else:
-            topk, indices = _.topk(seq_len,dim=1)
-        tag_mask=Variable(torch.ones(batch_size, seq_len).cuda())
-        tag_mask=tag_mask.scatter(1,indices,0).long()
-        print("tag_mask",tag_mask)
-        return tag_mask
+            topk, indices = rand_vec.topk(seq_len,dim=1)
+        pos_mask=Variable(torch.ones(batch_size, seq_len).cuda())
+        pos_mask=pos_mask.scatter(1,indices,0).long()
+        return pos_mask
     #For the afterward updating of the crf
     def sent2features(self,sent):
         return [self.features(sent, i) for i in range(len(sent))]
@@ -95,7 +88,7 @@ class BiLSTM_CRF():
     def sequence_to_tensor(self,_alphabet, word_inputs):
         return torch.LongTensor([[_alphabet.get_index(x) for x in word_inputs[0]]])
     
-    def crf_loss(self, word_inputs, word_seq_lengths, char_inputs, char_seq_lengths, char_seq_recover, batch_label, mask,t=None):
+    def crf_loss(self, word_inputs, word_seq_lengths, char_inputs, char_seq_lengths, char_seq_recover, batch_label, mask,t=None, pos_mask=None):
         
         batch_size = word_inputs.size(0)
         seq_len = word_inputs.size(1)
@@ -103,47 +96,65 @@ class BiLSTM_CRF():
         #outs = self.lstm.get_output_score(word_inputs, word_seq_lengths, char_inputs, char_seq_lengths, char_seq_recover)
 
         tag_seq = self.sequence_to_tensor(self.label_alphabet,self.crf.predict(self.tensor_to_sequence(self.word_alphabet,word_inputs,label=False)))
+        hehe=self.crf.predict_marginals(self.tensor_to_sequence(self.word_alphabet,word_inputs,label=False))
+        #print("hehe",self.label_alphabet.instances)
+        #print("gg",word_seq_lengths[0])
+        tag_prob=Variable(torch.zeros(1,word_seq_lengths[0], self.tag_size).cuda())
+        j=0
+        for key in self.label_alphabet.instances:
+            for i in range(word_seq_lengths[0]):
+                if key in hehe[0][i]:
+                    tag_prob[0,i,j]=hehe[0][i][key]
+                else:
+                    tag_prob[0,i,j]=0.0
+            j+=1
         if t!=None:
-            t_mask=self.tag_mask_list[t]
+            t_mask=self.pos_mask_list[t]
             #print("t_mask",t_mask)
-            indices, pos_mask, scores_ref,score = self.reformulator.neg_log_likelihood_loss(word_inputs, word_seq_lengths, char_inputs, char_seq_lengths, char_seq_recover,batch_label,tag_seq,mask*t_mask.byte())
+            indices, pos_mask, scores_ref,score,correct = self.examiner.neg_log_likelihood_loss(word_inputs, word_seq_lengths, char_inputs, char_seq_lengths, char_seq_recover,batch_label,tag_seq,tag_prob,mask*t_mask.byte())
         else:
-            indices, pos_mask, scores_ref,score = self.reformulator.neg_log_likelihood_loss(word_inputs, word_seq_lengths, char_inputs, char_seq_lengths, char_seq_recover,batch_label,tag_seq,mask)
-        pos_mask = self.rand_mask(word_inputs,mask)#currently we are using random mask
-        self.tag_mask=pos_mask
-
-
+            indices, pos_mask, scores_ref,score,correct = self.examiner.neg_log_likelihood_loss(word_inputs, word_seq_lengths, char_inputs, char_seq_lengths, char_seq_recover,batch_label,tag_seq,tag_prob,mask)
+        #pos_mask = self.rand_mask(word_inputs,mask)#currently we are using random mask
+        self.pos_mask=pos_mask
         batch_label=self.masked_label(pos_mask,mask,batch_label, tag_seq)
 
         #total_loss = self.crf.neg_log_likelihood_loss(outs, mask, batch_label)
 
         
-        return batch_label,tag_seq,pos_mask,score,indices,scores_ref
-    def add_instance(self,word_inputs,batch_label,tag_mask,instance,scores_ref):
+        return batch_label,tag_seq,tag_prob,pos_mask,score,indices,scores_ref
+    def add_instance(self,word_inputs,batch_label,pos_mask,instance,scores_ref):
         batch_size = word_inputs.size(0)
         seq_len = word_inputs.size(1)
         self.X_train.append(self.tensor_to_sequence(self.word_alphabet,word_inputs,label=False)[0])
         self.Y_train.append(self.tensor_to_sequence(self.label_alphabet,batch_label)[0])
         #print("self.tag_mask",self.tag_mask.size())
-        #print("self.Y_train",self.tensor_to_sequence(self.label_alphabet,batch_label)[0])
-        if tag_mask is None:
-            self.tag_mask_list.append(Variable(torch.zeros(batch_size, seq_len).long()).cuda()) 
+
+        if pos_mask is None:
+            self.pos_mask_list.append(Variable(torch.zeros(batch_size, seq_len).long()).cuda()) 
         else:
-            self.tag_mask_list.append(tag_mask) 
+            self.pos_mask_list.append(pos_mask) 
         self.instances.append(instance)
         self.scores_refs.append(scores_ref)
-    def readd_instance(self,batch_label, mask,tag_mask, i,scores_ref):
+    def readd_instance(self,batch_label, mask,pos_mask, i,scores_ref):
         tag_seq = self.sequence_to_tensor(self.label_alphabet,self.crf.predict([self.X_train[i]]))
 
-        pos_mask=self.tag_mask_list[i].long()*tag_mask.long()
+        pos_mask=self.pos_mask_list[i].long()*pos_mask.long()
 
         batch_label=self.masked_label(pos_mask,mask,batch_label, tag_seq)
         self.Y_train[i]=self.tensor_to_sequence(self.label_alphabet,batch_label)[0]
-        self.tag_mask_list[i]=pos_mask
+        self.pos_mask_list[i]=pos_mask
         self.scores_refs[i]=scores_ref
 
 
-    def reinforment_reward(self, word_inputs, word_seq_lengths, char_inputs, char_seq_lengths, char_seq_recover, batch_label,tag_seq, mask):
+    def reinforment_reward(self, word_inputs, word_seq_lengths, char_inputs, char_seq_lengths, char_seq_recover, batch_label,tag_seq,tag_prob, mask):
+        batch_size = word_inputs.size(0)
+        seq_len = word_inputs.size(1)
+ 
+        indices,pos_mask,scores_ref,score,correct = self.examiner.neg_log_likelihood_loss(word_inputs, word_seq_lengths, char_inputs, char_seq_lengths, char_seq_recover,batch_label,tag_seq,tag_prob,mask)        
+
+        return pos_mask,scores_ref,(score*(1-pos_mask.float())).sum()
+
+    def reinforment_supervised(self, word_inputs, word_seq_lengths, char_inputs, char_seq_lengths, char_seq_recover, batch_label,tag_seq,tag_prob, mask):
         batch_size = word_inputs.size(0)
         seq_len = word_inputs.size(1)
         #get score and tag_seq
@@ -153,13 +164,12 @@ class BiLSTM_CRF():
         #print(batch_label)
 
         #get_selected position
-        indices,pos_mask,scores_ref,score = self.reformulator.neg_log_likelihood_loss(word_inputs, word_seq_lengths, char_inputs, char_seq_lengths, char_seq_recover,batch_label,tag_seq,mask)
-        #if self.average_batch:
-        #    total_loss = total_loss / batch_size
-        #    total_loss1 = total_loss1 / batch_size
+        indices,pos_mask,scores_ref,score,correct = self.examiner.neg_log_likelihood_loss(word_inputs, word_seq_lengths, char_inputs, char_seq_lengths, char_seq_recover,batch_label,tag_seq,tag_prob,mask)
+
         
 
-        return pos_mask,scores_ref
+        return pos_mask,score
+
 
     def pop_instance(self,x):
         self.X_train.pop(0)
@@ -170,7 +180,7 @@ class BiLSTM_CRF():
             tag_seq = self.sequence_to_tensor(self.label_alphabet,self.crf.predict([self.X_train[i]]))
 
 
-            pos_mask=self.tag_mask_list[i]
+            pos_mask=self.pos_mask_list[i]
 
             batch_label=self.masked_label(pos_mask,mask,Variable(self.sequence_to_tensor(self.label_alphabet,[self.Y_train[i]])).cuda(), tag_seq)
             self.Y_train[i]=self.tensor_to_sequence(self.label_alphabet,batch_label)[0]
@@ -223,7 +233,7 @@ class BiLSTM_CRF():
                 if part_cumulative[j] >= i-1:
                     part_indicator[j] = 1
                     break
-            word1 = sent[i-1][0]
+            word1 = sent[i-1]
             if word1.isdigit():
                 itself1 = 'NUM'
             else:
@@ -244,7 +254,7 @@ class BiLSTM_CRF():
                 if part_cumulative[j] >= i + 1:
                     part_indicator[j] = 1
                     break
-            word1 = sent[i+1][0]
+            word1 = sent[i+1]
             if word1.isdigit():
                 itself1 = 'NUM'
             else:
@@ -262,15 +272,13 @@ class BiLSTM_CRF():
         #
     
     def train(self):
-        self.crf = CRF(
-            algorithm='lbfgs',
-            c1=0.1,
-            c2=0.1,
-            max_iterations=100,
-            all_possible_transitions=True
-        )
 
         self.crf.fit(self.X_train, self.Y_train)
+        return 
+    def sample_train(self,left,right):
+
+        self.crf.fit(self.X_train[left:right], self.Y_train[left:right])
+
         return 
     def test(self,word_inputs):
         tag_seq = self.sequence_to_tensor(self.label_alphabet,self.crf.predict(self.tensor_to_sequence(self.word_alphabet,word_inputs,label=False)))

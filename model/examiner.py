@@ -1,8 +1,4 @@
 # -*- coding: utf-8 -*-
-# @Author: Jie Yang
-# @Date:   2017-10-17 16:47:32
-# @Last Modified by:   Jie Yang,     Contact: jieynlp@gmail.com
-# @Last Modified time: 2018-01-07 17:09:34
 import torch
 import torch.autograd as autograd
 import torch.nn as nn
@@ -13,9 +9,10 @@ from charbilstm import CharBiLSTM
 from charcnn import CharCNN
 from torch.autograd import Variable
 
-class Reformulator(nn.Module):
+# The class for an Examiner
+class Examiner(nn.Module):
     def __init__(self, data):
-        super(Reformulator, self).__init__()
+        super(Examiner, self).__init__()
         print "build batched bilstm..."
         self.gpu = data.HP_gpu
         self.use_char = data.HP_use_char
@@ -71,7 +68,7 @@ class Reformulator(nn.Module):
         return pretrain_emb
 
 
-    def get_lstm_features(self, word_inputs, word_seq_lengths, char_inputs, char_seq_lengths, char_seq_recover,tag_seq,tag_size):
+    def get_lstm_features(self, word_inputs, word_seq_lengths, char_inputs, char_seq_lengths, char_seq_recover,tag_prob,tag_size):
         """
             input:
                 word_inputs: (batch_size, sent_len)
@@ -93,10 +90,12 @@ class Reformulator(nn.Module):
             char_features = char_features.view(batch_size,sent_len,-1)
             word_embs = torch.cat([word_embs, char_features], 2)
 
-        tag_feature = torch.zeros(batch_size, sent_len, tag_size).cuda().scatter_(2,tag_seq.unsqueeze(2).cuda(),1.0)
+        tag_feature = tag_prob#torch.zeros(batch_size, sent_len, tag_size).cuda().scatter_(2,tag_seq.unsqueeze(2).cuda(),1.0)
+        #print("tag_feature")
+        #print(tag_feature)
         ## concat word and char together
         word_embs = self.drop(word_embs)
-        word_embs = torch.cat([word_embs, Variable(tag_feature)], 2)
+        word_embs = torch.cat([word_embs, tag_feature], 2)
         packed_words = pack_padded_sequence(word_embs, word_seq_lengths.cpu().numpy(), True)
         hidden = None
         packed_words.requires_grad=False
@@ -114,91 +113,49 @@ class Reformulator(nn.Module):
         return outputs
     
 
-    def neg_log_likelihood_loss(self, word_inputs, word_seq_lengths, char_inputs, char_seq_lengths, char_seq_recover, batch_label,tag_seq, mask):
-        ## mask is not used
+    def neg_log_likelihood_loss(self, word_inputs, word_seq_lengths, char_inputs, char_seq_lengths, char_seq_recover, batch_label,tag_seq,tag_prob, mask):
+
         batch_size = word_inputs.size(0)
         seq_len = word_inputs.size(1)
         total_word = batch_size * seq_len
-        #loss_function = nn.CrossEntropyLoss()
-        outs = self.get_output_score(word_inputs, word_seq_lengths, char_inputs, char_seq_lengths, char_seq_recover,tag_seq)
+
+        outs = self.get_output_score(word_inputs, word_seq_lengths, char_inputs, char_seq_lengths, char_seq_recover,tag_prob)
         # outs (batch_size, seq_len, 2)
+
         outs = outs.view(total_word, -1)
         score = F.softmax(outs, 1)
+        # score: The score for choosing each position
 
-        #loss = loss_function(score, batch_label.view(total_word))
-        #if self.average_batch:
-        #    loss = loss / batch_size
-        #print('score0',loss)
 
-        _=score[:,0]
+        score=score[:,0]
 
-        _=_.contiguous().view(batch_size,seq_len)
-        #print(_)
+        score=score.contiguous().view(batch_size,seq_len)
 
-        _=mask.float() * _#the score is always positive
-        #print(mask)
-        #print("_",_)
-        _=F.softmax(_, 1)
+        score=mask.float() * score#the score is always positive
+
+        score=F.softmax(score, 1)
 
         if seq_len>=self.topk:
-            #print(self.topk)
-            topk, indices = _.topk(self.topk,dim=1)
+            topk, indices = score.topk(self.topk,dim=1)
         else:
-            #print(seq_len)
-            topk, indices = _.topk(seq_len,dim=1)
+            topk, indices = score.topk(seq_len,dim=1)
         tag_mask=Variable(torch.ones(batch_size, seq_len).cuda())
         tag_mask=tag_mask.scatter(1,indices,0).long()
-        #print("topk",topk)
-        #topk=F.softmax(topk, 1)
-        topk=torch.log(topk)
-        #print(topk)
+        # tag mask: selected positons as mask vector 
 
-        #topk=torch.log(_)*(1-(-torch.abs(Variable(tag_seq).cuda()-batch_label)).ge(0).float())
+        topk=torch.log(topk)
+        #topk: the topk scores
         
         info_tensor=(1-(-torch.abs(Variable(tag_seq).cuda()-batch_label)).ge(0).float())#inequal if one
         _sum=info_tensor.sum().long()[0]
 
-        ans=-torch.log(_)*(1-(-torch.abs(Variable(tag_seq).cuda()-batch_label)).ge(0).float())
-        correct=_*(1-(-torch.abs(Variable(tag_seq).cuda()-batch_label)).ge(0).float())
-        #ans=0.0
-        #for i in range(_sum):
-        #    ans+=torch.index_select(info_tensor[0],0,indices[0][:i+1]).sum()/float(i+1)
+        full_loss=-torch.log(score)*(1-(-torch.abs(Variable(tag_seq).cuda()-batch_label)).ge(0).float())
+        partial_reward=score*(1-(-torch.abs(Variable(tag_seq).cuda()-batch_label)).ge(0).float())
+        #full_loss: the supervised loss
+        #partial_loss: the partial labeled supervised reward
 
-        #print(batch_label)
-        #print(Variable(tag_seq).cuda())
-
-        return indices,tag_mask, topk.mean(1),ans,correct
-
-        # tag_seq = autograd.Variable(torch.zeros(batch_size, seq_len)).long()
-        # total_loss = 0
-        # for idx in range(batch_size):
-        #     score = F.log_softmax(outs[idx])
-        #     loss = loss_function(score, batch_label[idx])
-        #     # tag_seq[idx] = score.cpu().data.numpy().argmax(axis=1)
-        #     _, tag_seq[idx] = torch.max(score, 1)
-        #     total_loss += loss
-        # return total_loss, tag_seq
+        return indices,tag_mask, topk.mean(1),full_loss,partial_reward
 
 
-    def forward(self, word_inputs, word_seq_lengths, char_inputs, char_seq_lengths, char_seq_recover, mask,tag_seq):
-        
-        batch_size = word_inputs.size(0)
-        seq_len = word_inputs.size(1)
-        total_word = batch_size * seq_len
-        outs = self.get_output_score(word_inputs, word_seq_lengths, char_inputs, char_seq_lengths, char_seq_recover, tag_seq)
-        outs = outs.view(total_word, -1)
-        _, tag_seq  = torch.max(outs, 1)
-        tag_seq = tag_seq.view(batch_size, seq_len)
-        ## filter padded position with zero
-        decode_seq = mask.long() * tag_seq
-        #print('outs',out)
-        return decode_seq
-        # # tag_seq = np.zeros((batch_size, seq_len), dtype=np.int)
-        # tag_seq = autograd.Variable(torch.zeros(batch_size, seq_len)).long()
-        # if self.gpu:
-        #     tag_seq = tag_seq.cuda()
-        # for idx in range(batch_size):
-        #     score = F.log_softmax(outs[idx])
-        #     _, tag_seq[idx] = torch.max(score, 1)
-        #     # tag_seq[idx] = score.cpu().data.numpy().argmax(axis=1)
-        # return tag_seq
+
+
