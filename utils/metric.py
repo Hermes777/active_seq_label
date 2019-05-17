@@ -21,12 +21,12 @@ def get_ner_fmeasure(golden_lists, predict_lists, label_type="BMES"):
     right_full = []
     right_tag = 0
     all_tag = 0
-
+    #print("sent_num",sent_num)
     for idx in range(0,sent_num):
         # word_list = sentence_lists[idx]
         golden_list = golden_lists[idx]
         predict_list = predict_lists[idx]
-        for idy in range(len(golden_list)-1):
+        for idy in range(len(golden_list)):
             if golden_list[idy] == predict_list[idy]:
                 right_tag += 1
         all_tag += len(golden_list)
@@ -57,8 +57,9 @@ def get_ner_fmeasure(golden_lists, predict_lists, label_type="BMES"):
         f_measure = -1
     else:
         f_measure = 2*precision*recall/(precision+recall)
+    # print("accuracy",right_tag,all_tag)
     accuracy = (right_tag+0.0)/all_tag
-    print "Accuracy: ", right_tag,"/",all_tag,"=",accuracy
+    #print "Accuracy: ", right_tag,"/",all_tag,"=",accuracy
     #print "gold_num = ", golden_num, " pred_num = ", predict_num, " right_num = ", right_num
     return accuracy, precision, recall, f_measure
 

@@ -5,8 +5,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
 from torch.nn.utils.rnn import pack_padded_sequence, pad_packed_sequence
-from charbilstm import CharBiLSTM
-from charcnn import CharCNN
 from torch.autograd import Variable
 
 # The class for an Examiner
@@ -41,8 +39,7 @@ class Examiner(nn.Module):
             self.word_embeddings.weight.data.copy_(torch.from_numpy(data.pretrain_word_embedding))
         else:
             self.word_embeddings.weight.data.copy_(torch.from_numpy(self.random_embedding(data.word_alphabet.size(), self.embedding_dim)))
-        # The LSTM takes word embeddings as inputs, and outputs hidden states
-        # with dimensionality hidden_dim.
+
         if self.bilstm_flag:
             lstm_hidden = data.HP_hidden_dim // 2
         else:
@@ -69,16 +66,6 @@ class Examiner(nn.Module):
 
 
     def get_lstm_features(self, word_inputs, word_seq_lengths, char_inputs, char_seq_lengths, char_seq_recover,tag_prob,tag_size):
-        """
-            input:
-                word_inputs: (batch_size, sent_len)
-                word_seq_lengths: list of batch_size, (batch_size,1)
-                char_inputs: (batch_size*sent_len, word_length)
-                char_seq_lengths: list of whole batch_size for char, (batch_size*sent_len, 1)
-                char_seq_recover: variable which records the char order information, used to recover char order
-            output: 
-                Variable(batch_size, sent_len, hidden_dim)
-        """
         batch_size = word_inputs.size(0)
         sent_len = word_inputs.size(1)
         word_embs =  self.word_embeddings(word_inputs)
@@ -91,9 +78,6 @@ class Examiner(nn.Module):
             word_embs = torch.cat([word_embs, char_features], 2)
 
         tag_feature = tag_prob#torch.zeros(batch_size, sent_len, tag_size).cuda().scatter_(2,tag_seq.unsqueeze(2).cuda(),1.0)
-        #print("tag_feature")
-        #print(tag_feature)
-        ## concat word and char together
         word_embs = self.drop(word_embs)
         word_embs = torch.cat([word_embs, tag_feature], 2)
         packed_words = pack_padded_sequence(word_embs, word_seq_lengths.cpu().numpy(), True)

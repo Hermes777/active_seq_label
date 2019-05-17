@@ -23,16 +23,16 @@ def read_instance(input_file, word_alphabet, char_alphabet, label_alphabet, numb
     instence_texts = []
     instence_Ids = []
     for line_string,line_label in zip(in_lines_string,in_lines_label):
-        line_label=line_label[:-1].split(',')
+        line_label=line_label.split(',')[:-1]
+        line_label=line_label#+['\n']
+        line_string=line_string[:-1]
         words = []
         chars = []
         labels = []
         word_Ids = []
         char_Ids = []
         label_Ids = []
-        line_string=line_string[:-1]
         print(line_label)
-        print(line_string)
         assert len(line_label)==len(line_string)
         for i in range(len(line_label)):
             words.append(line_string[i])

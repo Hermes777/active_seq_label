@@ -157,10 +157,10 @@ class Data:
         in_lines_string = open(input_file+".string.txt",'r').readlines()
         in_lines_label = open(input_file+".label.txt",'r').readlines()
         for line_string,line_label in zip(in_lines_string,in_lines_label):
-            print(line_label)
-            print(line_string)
-            line_label=line_label[:-1].split(',')
             line_string=line_string[:-1]
+            line_label=line_label.split(',')
+            line_label=line_label[:-1]
+            line_label=line_label#+['\n']
             assert len(line_label)==len(line_string)
             for i in range(len(line_label)):
                 self.label_alphabet.add(line_label[i])

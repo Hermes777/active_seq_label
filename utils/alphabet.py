@@ -24,8 +24,11 @@ class Alphabet:
         # Index 0 is occupied by default, all else following.
         self.default_index = 0
         self.next_index = 1
+        self.label=False
+        
         if not self.label:
             self.add(self.UNKNOWN)
+        print(self.instance2index[self.UNKNOWN])
 
     def clear(self, keep_growing=True):
         self.instance2index = {}
