@@ -5,7 +5,7 @@
 # @Last Modified time: 2017-12-14 13:43:42
 import sys
 import numpy as np
-from alphabet import Alphabet
+from .alphabet import Alphabet
 
 def normalize_word(word):
     new_word = ""
@@ -95,10 +95,10 @@ def load_pretrain_emb(embedding_path):
                 assert (embedd_dim + 1 == len(tokens))
             embedd = np.empty([1, embedd_dim])
             embedd[:] = tokens[1:]
-            embedd_dict[tokens[0].decode('utf-8')] = embedd
+            embedd_dict[tokens[0]] = embedd
     return embedd_dict, embedd_dim
 
 if __name__ == '__main__':
     a = np.arange(9.0)
-    print a
-    print norm2one(a)
+    print(a)
+    print(norm2one(a))

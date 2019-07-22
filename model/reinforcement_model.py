@@ -5,17 +5,18 @@ import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
 #from crf import CRF
-from examiner import Examiner
+from .examiner import Examiner
 from torch.autograd import Variable
 import nltk
 from sklearn_crfsuite import CRF
 import math
+import scipy
  
 
 class SeqModel():
     def __init__(self, data):
 
-        print "build batched lstmcrf..."
+        print("build batched lstmcrf...")
 
         self.label_alphabet=data.label_alphabet
         self.word_alphabet=data.word_alphabet
@@ -25,7 +26,8 @@ class SeqModel():
             c1=0.1,
             c2=0.1,
             max_iterations=100,
-            all_possible_transitions=False
+            all_possible_states=False,
+            all_possible_transitions=True
         )
         self.examiner = Examiner(data)
         self.useExaminer = False
@@ -39,13 +41,17 @@ class SeqModel():
         self.pos_mask=None
         self.tag_size=data.label_alphabet_size
 
-    #For the afterward updating of the crf
+
     def masked_label(self,pos_mask,mask,batch_label,tag_seq):
+        """
+            generate masked label sequence
+        """   
 
 
         batch_label=batch_label.mul(1-pos_mask)
-
-        tag_seq=Variable(tag_seq).cuda().mul(pos_mask)
+        # print(tag_seq)
+        # print(pos_mask)
+        tag_seq=Variable(tag_seq).mul(pos_mask)
 
         return batch_label+tag_seq
 
@@ -54,23 +60,26 @@ class SeqModel():
         return list(zip(sentence, model.predict([sentence_features])[0]))
 
     def rand_mask(self,word_inputs,mask):
+        """
+            generate random mask
+        """   
         batch_size = word_inputs.size(0)
         seq_len = word_inputs.size(1)
         total_word = batch_size * seq_len
-        if self.full==True:
-            return Variable(torch.zeros(batch_size,seq_len).cuda().long(),requires_grad=False)
+        # if self.full==True:
+        #     return Variable(torch.zeros(batch_size,seq_len).long(),requires_grad=False)
         rand_vec=Variable(torch.rand(batch_size,seq_len),requires_grad=False)
 
-        rand_vec=mask.float() * rand_vec.cuda()
+        rand_vec=mask.cpu().float() * rand_vec
 
         if seq_len>=self.topk:
             topk, indices = rand_vec.topk(self.topk,dim=1)
         else:
             topk, indices = rand_vec.topk(seq_len,dim=1)
-        pos_mask=Variable(torch.ones(batch_size, seq_len).cuda())
+        pos_mask=Variable(torch.ones(batch_size, seq_len))
         pos_mask=pos_mask.scatter(1,indices,0).long()
-        return pos_mask
-    #For the afterward updating of the crf
+        return pos_mask.cuda()
+
     def sent2features(self,sent):
         return [self.features(sent, i) for i in range(len(sent))]
     def sent2labels(sent):
@@ -81,23 +90,26 @@ class SeqModel():
     def tensor_to_sequence(self, _alphabet, word_inputs, label=True):
         #seq_len = word_inputs.size(1)
         if label==True:
-            return [[_alphabet.get_instance(x.data[0]) for x in word_inputs[0]]]
+            return [[_alphabet.get_instance(x) for x in word_inputs[0]]]
         else:
-            return [self.sent2features([_alphabet.get_instance(x.data[0]) for x in word_inputs[0]])]
+            #print(word_inputs)
+            return [self.sent2features([_alphabet.get_instance(x) for x in word_inputs[0]])]
     def sequence_to_tensor(self,_alphabet, word_inputs):
         return torch.LongTensor([[_alphabet.get_index(x) for x in word_inputs[0]]])
-    
+
     def pos_selection(self, word_inputs, word_seq_lengths, char_inputs, char_seq_lengths, char_seq_recover, batch_label, mask,t=None, pos_mask=None):
-        
+        """
+            a function to directly get reward while generating the new label sequence
+        """        
         batch_size = word_inputs.size(0)
         seq_len = word_inputs.size(1)
         #get score and tag_seq
-        #outs = self.lstm.get_output_score(word_inputs, word_seq_lengths, char_inputs, char_seq_lengths, char_seq_recover)
 
         tag_seq = self.sequence_to_tensor(self.label_alphabet,self.crf.predict(self.tensor_to_sequence(self.word_alphabet,word_inputs,label=False)))
         distributions=self.crf.predict_marginals(self.tensor_to_sequence(self.word_alphabet,word_inputs,label=False))
+        tag_seq = tag_seq.cuda()
 
-        tag_prob=Variable(torch.zeros(1,word_seq_lengths[0], self.tag_size).cuda())
+        tag_prob=Variable(torch.zeros(1,word_seq_lengths[0], self.tag_size))
         for j,key in enumerate(self.label_alphabet.instances):
             for i in range(word_seq_lengths[0]):
                 if key in distributions[0][i]:
@@ -107,71 +119,76 @@ class SeqModel():
         if t!=None:
             t_mask=self.pos_mask_list[t]
 
-            indices, pos_mask, scores_ref,score,correct = self.examiner.neg_log_likelihood_loss(word_inputs, word_seq_lengths, char_inputs, char_seq_lengths, char_seq_recover,batch_label,tag_seq,tag_prob,mask*t_mask.byte())
+            indices, pos_mask, scores_ref,score = self.examiner.neg_log_likelihood_loss(word_inputs, word_seq_lengths, char_inputs, char_seq_lengths, char_seq_recover,batch_label,tag_seq,tag_prob,mask*(1-t_mask).byte(),self.crf)
         else:
-            indices, pos_mask, scores_ref,score,correct = self.examiner.neg_log_likelihood_loss(word_inputs, word_seq_lengths, char_inputs, char_seq_lengths, char_seq_recover,batch_label,tag_seq,tag_prob,mask)
-        #pos_mask = self.rand_mask(word_inputs,mask)#random mask
+            indices, pos_mask, scores_ref,score = self.examiner.neg_log_likelihood_loss(word_inputs, word_seq_lengths, char_inputs, char_seq_lengths, char_seq_recover,batch_label,tag_seq,tag_prob,mask,self.crf)
+
         self.pos_mask=pos_mask
         new_batch_label=self.masked_label(pos_mask,mask,batch_label, tag_seq)
         
         return new_batch_label,tag_seq,tag_prob,pos_mask,score,indices,scores_ref
-    def add_instance(self,word_inputs,batch_label,pos_mask,instance,scores_ref):
+
+    def add_instance(self,word_inputs,batch_label,pos_mask):
+        """
+            add instances to training dataset
+        """
         batch_size = word_inputs.size(0)
         seq_len = word_inputs.size(1)
         self.X_train.append(self.tensor_to_sequence(self.word_alphabet,word_inputs,label=False)[0])
         self.Y_train.append(self.tensor_to_sequence(self.label_alphabet,batch_label)[0])
-        #print("self.tag_mask",self.tag_mask.size())
 
         if pos_mask is None:
-            self.pos_mask_list.append(Variable(torch.zeros(batch_size, seq_len).long()).cuda()) 
+            self.pos_mask_list.append(Variable(torch.zeros(batch_size, seq_len).long())) 
         else:
             self.pos_mask_list.append(pos_mask) 
-        self.instances.append(instance)
-        self.scores_refs.append(scores_ref)
-    def readd_instance(self,batch_label, mask,pos_mask, i,scores_ref):
-        tag_seq = self.sequence_to_tensor(self.label_alphabet,self.crf.predict([self.X_train[i]]))
-
-        pos_mask=self.pos_mask_list[i].long()*pos_mask.long()
-
-        batch_label=self.masked_label(pos_mask,mask,batch_label, tag_seq)
-        self.Y_train[i]=self.tensor_to_sequence(self.label_alphabet,batch_label)[0]
-        self.pos_mask_list[i]=pos_mask
-        self.scores_refs[i]=scores_ref
 
 
-    def reinforment_reward(self, word_inputs, word_seq_lengths, char_inputs, char_seq_lengths, char_seq_recover, batch_label,tag_seq,tag_prob, mask,mode):
+
+    def reinforcement_reward(self, word_inputs, word_seq_lengths, char_inputs, char_seq_lengths, char_seq_recover, batch_label,tag_seq,tag_prob, mask,mode):
+        """
+            a function to directly get reward instead of generating the new label sequence
+        """
         batch_size = word_inputs.size(0)
         seq_len = word_inputs.size(1)
- 
-        indices,pos_mask,scores_ref,full_loss,partial_reward = self.examiner.neg_log_likelihood_loss(word_inputs, word_seq_lengths, char_inputs, char_seq_lengths, char_seq_recover,batch_label,tag_seq,tag_prob,mask)        
+        tag_seq = self.sequence_to_tensor(self.label_alphabet,self.crf.predict(self.tensor_to_sequence(self.word_alphabet,word_inputs,label=False)))
+        distributions=self.crf.predict_marginals(self.tensor_to_sequence(self.word_alphabet,word_inputs,label=False))
+        tag_seq = tag_seq.cuda()
+
+        tag_prob=Variable(torch.zeros(1,word_seq_lengths[0], self.tag_size))
+        for j,key in enumerate(self.label_alphabet.instances):
+            for i in range(word_seq_lengths[0]):
+                if key in distributions[0][i]:
+                    tag_prob[0,i,j]=distributions[0][i][key]
+                else:
+                    tag_prob[0,i,j]=0.0
+        indices,pos_mask,scores_ref,full_loss = self.examiner.neg_log_likelihood_loss(word_inputs, word_seq_lengths, char_inputs, char_seq_lengths, char_seq_recover,batch_label,tag_seq,tag_prob,mask,self.crf)        
         '''
             indices: the selected positions as indices
-            pos_mask: the selected positions as mask vector
             pos_mask: the selected positions as mask vector
 
         '''
         if mode=="supervised_partial":
             return pos_mask,(full_loss*(1-pos_mask.float())).sum()
         elif mode=="supervised_full":
-            return pos_mask,full_loss
+            return pos_mask,full_loss.sum()
         else:
             return pos_mask,scores_ref
 
 
 
-    def pop_instance(self,x):
-        self.X_train.pop(0)
-        self.Y_train.pop(0)
-    def reevaluate_instance(self, mask):
-        for i in range(len(self.X_train)):
-            #X_train[i]
-            tag_seq = self.sequence_to_tensor(self.label_alphabet,self.crf.predict([self.X_train[i]]))
+    # def pop_instance(self,x):
+    #     self.X_train.pop(0)
+    #     self.Y_train.pop(0)
+    # def reevaluate_instance(self, mask):
+    #     for i in range(len(self.X_train)):
+    #         #X_train[i]
+    #         tag_seq = self.sequence_to_tensor(self.label_alphabet,self.crf.predict([self.X_train[i]]))
 
 
-            pos_mask=self.pos_mask_list[i]
+    #         pos_mask=self.pos_mask_list[i]
 
-            batch_label=self.masked_label(pos_mask,mask,Variable(self.sequence_to_tensor(self.label_alphabet,[self.Y_train[i]])).cuda(), tag_seq)
-            self.Y_train[i]=self.tensor_to_sequence(self.label_alphabet,batch_label)[0]
+    #         batch_label=self.masked_label(pos_mask,mask,Variable(self.sequence_to_tensor(self.label_alphabet,[self.Y_train[i]])), tag_seq)
+    #         self.Y_train[i]=self.tensor_to_sequence(self.label_alphabet,batch_label)[0]
 
 
     def features(self,sent, i):
@@ -257,7 +274,6 @@ class SeqModel():
         else:
             features['EOS'] = True
         return features
-        #
     
     def train(self):
 
@@ -268,9 +284,16 @@ class SeqModel():
         self.crf.fit(self.X_train[left:right], self.Y_train[left:right])
 
         return 
+    def clear(self):
+        self.X_train=[]
+        self.Y_train=[]
+
+        self.pos_mask_list=[]
+        return 
+
     def test(self,word_inputs):
         tag_seq = self.sequence_to_tensor(self.label_alphabet,self.crf.predict(self.tensor_to_sequence(self.word_alphabet,word_inputs,label=False)))
-        return Variable(tag_seq).cuda()
+        return Variable(tag_seq)
 
 
 

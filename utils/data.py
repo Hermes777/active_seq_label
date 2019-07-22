@@ -5,9 +5,9 @@
 # @Last Modified time: 2018-01-19 11:34:34
 import sys
 import numpy as np
-from alphabet import Alphabet
-from functions import *
-import cPickle as pickle
+from .alphabet import Alphabet
+from .functions import *
+import pickle
 
 
 START = "</s>"
@@ -42,8 +42,8 @@ class Data:
         self.test_Ids = []
         self.raw_Ids = []
 
-        self.word_emb_dim = 50
-        self.char_emb_dim = 30
+        self.word_emb_dim = 20
+        self.char_emb_dim = 2
         self.pretrain_word_embedding = None
         self.pretrain_char_embedding = None
         self.label_size = 0
@@ -54,7 +54,7 @@ class Data:
         self.HP_iteration = 100
         self.HP_batch_size = 10
         self.HP_average_batch_loss = False
-        self.HP_char_hidden_dim = 50
+        self.HP_char_hidden_dim = 2
         self.HP_hidden_dim = 50
         self.HP_dropout = 0.5
         self.HP_lstm_layer = 1
