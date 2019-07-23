@@ -163,7 +163,7 @@ def evaluate(data, model, name, qleft=None,qright=None,batch_size=1):
     pred_results = []
     gold_results = []
     ## set model in eval mode
-    model.examiner.eval()
+    model.examiner.train()
     start_time = time.time()
     train_num = len(instances)
     total_batch = train_num//batch_size+1
@@ -277,7 +277,7 @@ def train(data, save_model_dir, seg=True):
     f_list=[]
     map_list=[]
 
-    data.HP_lr=0.001
+    data.HP_lr=0.0001
     epoch_start = time.time()
     temp_start = epoch_start
 
@@ -320,24 +320,16 @@ def train(data, save_model_dir, seg=True):
         start_time = time.time()
 
         
-        if batch_idx==0:
-
-            print("start pretraining")
+        if batch_id==args.pre_iter-1:
+            model.train()
+            #model.examiner.init_crf(model.crf)
+            print("start")
+            print("parameters",len(model.crf.state_features_))
             for j in range(0,30):
                 __tot=0.0
-                total_num=0
-                total_reward=0.0
-                ave_scores=0.0
-                for i in range(args.pre_iter_crf):
-                    batch_id_temp=batch_ids[i]
-                    start = batch_id_temp*batch_size
-                    end = (batch_id_temp+1)*batch_size 
-                    instance = data.train_Ids[start:end]
-                    batch_word, batch_wordlen, batch_wordrecover, batch_char, batch_charlen, batch_charrecover, batch_label, mask  = batchify_with_label(instance, data.HP_gpu)
-                    model.add_instance(batch_word,batch_label,tag_mask)
-
+                batch_ids[:args.pre_iter]=numpy.random.permutation(batch_ids[:args.pre_iter])
                 for i in range(args.pre_iter_crf,args.pre_iter):
-                    model.train()
+                    model.sample_train(0,i)
                     batch_id_temp=batch_ids[i]
                     start = batch_id_temp*batch_size
                     end = (batch_id_temp+1)*batch_size 
@@ -347,42 +339,28 @@ def train(data, save_model_dir, seg=True):
 
                     new_batch_label,tag_seq,tag_prob,tag_mask,score,indices,scores_ref=model.pos_selection(batch_word, batch_wordlen, batch_char, batch_charlen, batch_charrecover, batch_label, mask)
 
-                    model.add_instance(batch_word,new_batch_label,tag_mask)
+                    #_pred_label, _gold_label = recover_label(Variable(tag_seq.cuda()), real_batch_label.cuda(),mask.cuda(), data.label_alphabet, batch_wordrecover)
 
-                    if total_num!=0:
-                        ave_scores=total_reward/total_num
-                    else:
-                        ave_scores=0.0
-                    model.train()
-                    speed, acc, p, r, f, _ = evaluate(data, model, "dev")
-                    total_num+=1
-                    total_reward+=acc
 
-                    sample_scores = torch.from_numpy(np.asarray([acc])).float()
-                    ave_scores= torch.from_numpy(np.asarray([ave_scores])).float()
-                    reward_diff = Variable(sample_scores-ave_scores, requires_grad=False)
-                    if data.HP_gpu:
-                        reward_diff = reward_diff.cuda()
-                    model.examiner.train()
-                    pos_mask,selection_score  = model.reinforcement_reward(batch_word, batch_wordlen, batch_char, batch_charlen, batch_charrecover, batch_label,tag_seq,tag_prob, mask, mode="reinforcement")
-                    rl_loss = -selection_score 
+                    pos_mask,score = model.reinforcement_reward(batch_word, batch_wordlen, batch_char, batch_charlen, batch_charrecover, batch_label,tag_seq,tag_prob, mask, mode="supervised_full")
+                    
+                    # print("word",[data.word_alphabet.get_instance(x) for x in batch_word[0].data])
+                    # print("string",batch_label)
+                    # print("new_batch_label",new_batch_label)
+                    # print(score)
 
-                    rl_loss = torch.mul(rl_loss, reward_diff[0])
-                    rl_loss.backward()
+                    # #print("crf strcuture",model.crf.state_features_)
+                    # print("new",tag_seq)
 
-                    __tot+=rl_loss
+                    __tot+=score.sum()
+                    score.sum().backward()
                     optimizer.step()
                     model.examiner.zero_grad()
 
                 print("score",__tot/(args.pre_iter-args.pre_iter_crf))
-                model.clear()
-
             model.train()
-            model.clear()
-            ave_scores=0.0
-            total_num=0
-            total_reward=0.0
             optimizer = optim.SGD(model.examiner.parameters(), lr=data.HP_lr, momentum=data.HP_momentum)
+        tot_pos=0
 
         if batch_idx>=args.pre_iter:
             t=np.random.randint(len(model.X_train),total_batch)
@@ -509,6 +487,7 @@ def train(data, save_model_dir, seg=True):
         ###
         start_time = time.time()
         t=np.random.randint(1,10)
+        pos_mask,selection_score= model.reinforcement_reward(batch_word, batch_wordlen, batch_char, batch_charlen, batch_charrecover, batch_label,tag_seq,tag_prob, mask,mode="reinforcement")
 
         model.train()
         speed, acc, p, r, f, _ = evaluate(data, model, "dev")
@@ -528,7 +507,6 @@ def train(data, save_model_dir, seg=True):
 
         #the selection score now is what we have in evaluation, we need to calculate it again
         model.examiner.train()
-        pos_mask,selection_score= model.reinforcement_reward(batch_word, batch_wordlen, batch_char, batch_charlen, batch_charrecover, batch_label,tag_seq,tag_prob, mask,mode="reinforcement")
 
         ###
         #
